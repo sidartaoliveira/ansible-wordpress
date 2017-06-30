@@ -1,0 +1,151 @@
+---
+- hosts: wordpress
+  connection: lxd
+  vars_files:
+     - vars/wordpress.yml
+
+
+  handlers:
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+  tasks:
+    - name: Add the ondrej PHP PPA
+      apt_repository:
+         repo: 'ppa:ondrej/php'
+
+    - name: Update the apt cache
+      apt:
+         update_cache: yes
+         cache_valid_time: 3600
+
+    - name: Install unzip
+      apt:
+         name: unzip
+         state: installed
+
+    - name: Install PHP 7
+      apt:
+         name: "{{ item }}"
+         state: installed
+      with_items:
+        - php
+        - php-fpm
+        - php-mysql
+        - php-xml
+
+    - name: Remove apache2
+      apt:
+         name: apache2
+         state: absent
+
+    - name: Install MySQL
+      apt:
+         name: "{{ item }}"
+         state: installed
+      with_items:
+         - mysql-server-5.7
+         - python-mysqldb
+
+    - name: Removing anonymous users
+      mysql_user:
+         name: ""
+         state: absent
+
+    - name: Remove test database
+      mysql_db:
+         name: test
+         state: absent
+
+    - name: Generate new root password
+      command: openssl rand -hex 8 creates=/root/.my.cnf
+      register: mysql_new_root_password
+
+    - name: Create my.cnf
+      template:
+         src: templates/mysql/my.cnf
+         dest: /root/.my.cnf
+      when: mysql_new_root_password.changed
+
+    - name: Update root password
+      mysql_user:
+         name: root
+         host: "{{ item }}"
+         password: "{{ mysql_new_root_password.stdout }}"
+      with_items:
+         - "{{ ansible_hostname }}"
+         - 127.0.0.1
+         - ::1
+         - localhost
+      when: mysql_new_root_password.changed
+
+    - name: Output new root password
+      debug:
+         msg: "New root password is {{mysql_new_root_password.stdout}}"
+      when: mysql_new_root_password.changed
+
+    - name: Install nginx
+      apt:
+         name: nginx
+         state: installed
+
+    - name: Start nginx
+      service:
+         name: nginx
+         state: started
+
+    - name: Copy nginx.conf
+      template:
+         src: templates/nginx/default
+         dest: /etc/nginx/sites-available/default
+      notify: Restart nginx
+
+    - name: Get Wordpress checksum
+      uri:
+         url: https://wordpress.org/latest.zip.sha1
+         return_content: true
+      register: wp_checksum
+
+    - name: Download Wordpress
+      get_url:
+         url: https://wordpress.org/latest.zip
+         dest: /tmp/wordpress.zip
+         checksum: "sha1:{{ wp_checksum.content }}"
+
+    - name: Unzip Wordpress
+      unarchive:
+         src: /tmp/wordpress.zip
+         dest: /var/www/
+         copy: no
+         creates: /var/www/wordpress/wp-settings.php
+
+    - name: Create Wordpress MySQL database
+      mysql_db:
+         name: wordpress
+         state: present
+
+    - name: Create Wordpress MySQL user
+      mysql_user:
+         name: wordpress
+         password: "{{ wp_password }}"
+         host: localhost
+         priv: wordpress.*:ALL
+
+    - name: Create Wordpress wp-config.php
+      copy:
+         src: files/wordpress/wp-config.php
+         dest: /var/www/wordpress/wp-config.php
+
+    - name: Copy Wordpress DB
+      copy:
+         src: files/mysql/wp_soliveira_pw.sql
+         dest: /tmp/wordpress.sql
+
+    - name: Import Wordpress DB
+      mysql_db:
+         target: /tmp/wordpress.sql
+         name: wordpress
+         state: import
+      notify: Restart nginx
